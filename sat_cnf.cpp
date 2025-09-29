@@ -9,9 +9,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cassert>
-
 using namespace std;
 
+// ---------------- Gate ----------------
 class Gate {
 public:
     enum class Type { AND, OR, NOT, XOR, XNOR, NAND, NOR, BUF, MUX };
@@ -22,6 +22,7 @@ public:
     Gate(Type t, vector<string> in, string out) : type(t), inputs(in), output(out) {}
 };
 
+// ---------------- LogicCircuit ----------------
 class LogicCircuit {
 public:
     string name;
@@ -40,8 +41,40 @@ public:
             wires.insert(in);
         }
     }
+
+    vector<string> getOutputs() const {
+        unordered_set<string> allInputs;
+        for (const auto& gate : gates) {
+            for (const auto& in : gate.inputs) {
+                allInputs.insert(in);
+            }
+        }
+
+        vector<string> result;
+        for (const auto& wire : wires) {
+            if (allInputs.find(wire) == allInputs.end()) {
+                result.push_back(wire);
+            }
+        }
+
+        for (const auto& out : outputs) {
+            if (find(result.begin(), result.end(), out) == result.end()) {
+                result.push_back(out);
+            }
+        }
+
+        sort(result.begin(), result.end());
+        return result;
+    }
+
+    vector<string> getInputs() const {
+        vector<string> result(inputs.begin(), inputs.end());
+        sort(result.begin(), result.end());
+        return result;
+    }
 };
 
+// ---------------- CNFConverter ----------------
 class CNFConverter {
 private:
     int variableCounter;
@@ -91,6 +124,47 @@ private:
             clauses.push_back({-outputVar, -inpVar});
             clauses.push_back({outputVar, inpVar});
         }
+        else if (gate.type == Gate::Type::XOR) {
+            int a = inputVars[0];
+            int b = inputVars[1];
+            clauses.push_back({-a, -b, -outputVar});
+            clauses.push_back({a, b, -outputVar});
+            clauses.push_back({a, -b, outputVar});
+            clauses.push_back({-a, b, outputVar});
+        }
+        else if (gate.type == Gate::Type::XNOR) {
+            int a = inputVars[0];
+            int b = inputVars[1];
+            clauses.push_back({a, b, -outputVar});
+            clauses.push_back({-a, -b, -outputVar});
+            clauses.push_back({-a, b, outputVar});
+            clauses.push_back({a, -b, outputVar});
+        }
+        else if (gate.type == Gate::Type::NAND) {
+            int a = inputVars[0];
+            int b = inputVars[1];
+            clauses.push_back({-a, -b, outputVar});
+            clauses.push_back({-outputVar, a});
+            clauses.push_back({-outputVar, b});
+        }
+        else if (gate.type == Gate::Type::NOR) {
+            int a = inputVars[0];
+            int b = inputVars[1];
+            clauses.push_back({-a, -b, outputVar});
+            clauses.push_back({-outputVar, -a});
+            clauses.push_back({-outputVar, -b});
+        }
+        else if (gate.type == Gate::Type::MUX) {
+            int a = inputVars[0];   // input a
+            int b = inputVars[1];   // input b
+            int sel = inputVars[2]; // select
+            // y = (sel & b) | (~sel & a)
+            clauses.push_back({-sel, a, outputVar});  // (~sel & a => y)
+            clauses.push_back({sel, b, outputVar});   // (sel & b => y)
+            clauses.push_back({-outputVar, -sel, a}); // y => (~sel & a) OR ...
+            clauses.push_back({-outputVar, sel, b});  // y => (sel & b)
+        }
+
         return clauses;
     }
 
@@ -109,6 +183,12 @@ public:
             auto getClauses = gateToCNF(gate);
             clauses.insert(clauses.end(), getClauses.begin(), getClauses.end());
         }
+
+        cout << "Variable mapping:\n";
+        for (const auto& [name, num] : variableMap) {
+            cout << name << " -> " << num << "\n";
+        }
+        
         return clauses;
     }
 
@@ -121,7 +201,7 @@ public:
     }
 };
 
-// ---------------- PARSER ----------------
+// ---------------- VerilogParser ----------------
 class VerilogParser {
 public:
     static LogicCircuit parse(const string& filename) {
@@ -162,10 +242,27 @@ private:
 
         stringstream ss(cleaned);
         string word;
-        ss >> word;
+        ss >> word; // "input" or "output"
+
+        int msb = -1, lsb = -1;
+        if (ss.peek() == '[') {
+            char ch;
+            ss >> ch; // '['
+            ss >> msb;
+            ss >> ch; // ':'
+            ss >> lsb;
+            ss >> ch; // ']'
+        }
 
         while (ss >> word) {
-            container.insert(word);
+            if (msb != -1 && lsb != -1) {
+                int step = (msb > lsb) ? -1 : 1;
+                for (int i = msb; i != lsb + step; i += step) {
+                    container.insert(word + "[" + to_string(i) + "]");
+                }
+            } else {
+                container.insert(word);
+            }
         }
     }
 
@@ -173,7 +270,7 @@ private:
         string cleaned = line;
         cleaned.erase(remove_if(cleaned.begin(), cleaned.end(),
                                 [](unsigned char c) { return c == ';'; }),
-                      cleaned.end());
+                    cleaned.end());
 
         size_t pos = cleaned.find('=');
         if (pos == string::npos) return;
@@ -187,19 +284,67 @@ private:
 
         lhs.erase(remove_if(lhs.begin(), lhs.end(), ::isspace), lhs.end());
         rhs.erase(remove_if(rhs.begin(), rhs.end(), ::isspace), rhs.end());
+        
+        // Handle 2-to-1 MUX: sel ? b : a
+        size_t quesPos = rhs.find('?');
+        size_t colonPos = rhs.find(':');
+        if (quesPos != string::npos && colonPos != string::npos) {
+            string sel = rhs.substr(0, quesPos);
+            string b   = rhs.substr(quesPos + 1, colonPos - quesPos - 1);
+            string a   = rhs.substr(colonPos + 1);
+            sel.erase(remove_if(sel.begin(), sel.end(), ::isspace), sel.end());
+            a.erase(remove_if(a.begin(), a.end(), ::isspace), a.end());
+            b.erase(remove_if(b.begin(), b.end(), ::isspace), b.end());
+            circuit.addGate(Gate(Gate::Type::MUX, {a, b, sel}, lhs));
+            return;
+        }
 
+        // Handle XNOR, NOR, NAND: ~(a ^ b), ~(a | b), ~(a & b)
+        if (!rhs.empty() && rhs[0] == '~' && rhs[1] == '(' && rhs.back() == ')') {
+            string inner = rhs.substr(2, rhs.size() - 3); // remove ~( and )
+            size_t xorPos = inner.find('^');
+            size_t orPos  = inner.find('|');
+            size_t andPos = inner.find('&');
+
+            if (xorPos != string::npos) {
+                string left = inner.substr(0, xorPos);
+                string right = inner.substr(xorPos + 1);
+                left.erase(remove_if(left.begin(), left.end(), ::isspace), left.end());
+                right.erase(remove_if(right.begin(), right.end(), ::isspace), right.end());
+                circuit.addGate(Gate(Gate::Type::XNOR, {left, right}, lhs));
+                return;
+            } else if (orPos != string::npos) {
+                string left = inner.substr(0, orPos);
+                string right = inner.substr(orPos + 1);
+                left.erase(remove_if(left.begin(), left.end(), ::isspace), left.end());
+                right.erase(remove_if(right.begin(), right.end(), ::isspace), right.end());
+                circuit.addGate(Gate(Gate::Type::NOR, {left, right}, lhs));
+                return;
+            } else if (andPos != string::npos) {
+                string left = inner.substr(0, andPos);
+                string right = inner.substr(andPos + 1);
+                left.erase(remove_if(left.begin(), left.end(), ::isspace), left.end());
+                right.erase(remove_if(right.begin(), right.end(), ::isspace), right.end());
+                circuit.addGate(Gate(Gate::Type::NAND, {left, right}, lhs));
+                return;
+            }
+        }
+
+        // Handle unary NOT
         if (!rhs.empty() && (rhs[0] == '~' || rhs[0] == '!')) {
             string operand = rhs.substr(1);
             circuit.addGate(Gate(Gate::Type::NOT, {operand}, lhs));
             return;
         }
 
+        // Handle binary operators: AND, OR, XOR
         vector<string> operators = {"&", "|", "^"};
         for (const auto& op : operators) {
-            size_t pos = rhs.find(op);
-            if (pos != string::npos) {
-                string left = rhs.substr(0, pos);
-                string right = rhs.substr(pos + op.length());
+            size_t opPos = rhs.find(op);
+            if (opPos != string::npos) {
+                string left  = rhs.substr(0, opPos);
+                string right = rhs.substr(opPos + op.length());
+
                 left.erase(remove_if(left.begin(), left.end(), ::isspace), left.end());
                 right.erase(remove_if(right.begin(), right.end(), ::isspace), right.end());
 
@@ -207,7 +352,7 @@ private:
                     Gate::Type gateType;
                     if (op == "&") gateType = Gate::Type::AND;
                     else if (op == "|") gateType = Gate::Type::OR;
-                    else gateType = Gate::Type::XOR;
+                    else if (op == "^") gateType = Gate::Type::XOR;
 
                     circuit.addGate(Gate(gateType, {left, right}, lhs));
                     return;
@@ -218,65 +363,26 @@ private:
 };
 
 // ---------------- MAIN ----------------
-int main() {
-    string filename = "and_gate.v"; 
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        cerr << "Usage: ./sat_cnf <verilog_file>\n";
+        return 1;
+    }
+    string filename = argv[1];
     LogicCircuit circuit = VerilogParser::parse(filename);
 
     CNFConverter converter;
     auto cnf = converter.circuitToCNF(circuit);
-    auto varMap = converter.getVariableMap();
 
-    cout << "c Variable mapping (signal_name -> variable_number):\n";
-    for (const auto& kv : varMap) {
-        cout << "c " << kv.first << " -> " << kv.second << "\n";
-    }
-
-    // Ask constraints
-    cout << "\nAdd constraints on outputs (e.g., y=1 or y=0). Enter 'done' when finished.\n";
-    string constraint;
-    while (true) {
-        cout << "Constraint: ";
-        getline(cin, constraint);
-
-        if (constraint == "done") break;
-        size_t eqPos = constraint.find('=');
-        if (eqPos == string::npos) {
-            cout << "Invalid format. Use signal=value\n";
-            continue;
-        }
-
-        string signal = constraint.substr(0, eqPos);
-        string value = constraint.substr(eqPos + 1);
-        signal.erase(remove_if(signal.begin(), signal.end(), ::isspace), signal.end());
-        value.erase(remove_if(value.begin(), value.end(), ::isspace), value.end());
-
-        if (varMap.find(signal) == varMap.end()) {
-            cout << "Unknown signal: " << signal << "\n";
-            continue;
-        }
-
-        int var = varMap.at(signal);
-        if (value == "1") {
-            cnf.push_back({var});
-        } else if (value == "0") {
-            cnf.push_back({-var});
-        } else {
-            cout << "Invalid value. Use 0 or 1.\n";
-        }
-    }
-
-    // Save CNF to circuit.cnf
     ofstream out("circuit.cnf");
     out << "p cnf " << converter.getNumVariables() << " " << cnf.size() << "\n";
     for (const auto& clause : cnf) {
-        for (int lit : clause) {
-            out << lit << " ";
-        }
+        for (int lit : clause) out << lit << " ";
         out << "0\n";
     }
     out.close();
 
-    cout << "\nCNF written to circuit.cnf\n";
+    cout << "CNF written to circuit.cnf\n";
     return 0;
 }
 
