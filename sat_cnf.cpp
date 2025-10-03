@@ -515,10 +515,26 @@ public:
             if (line.find("endmodule") != string::npos) continue;
 
             if (line.find("input") != string::npos) {
+                // cout << "DEBUG: Parsing INPUT line: \"" << line << "\"" << endl;
                 parseIO(line, circuit.inputs);
+                // cout << "DEBUG: After parsing, inputs contain: ";
+                vector<string> sorted_inputs(circuit.inputs.begin(), circuit.inputs.end());
+                sort(sorted_inputs.begin(), sorted_inputs.end());
+                for (const auto& inp : sorted_inputs) {
+                    // cout << "\"" << inp << "\" ";
+                }
+                // cout << endl << endl;
             }
             else if (line.find("output") != string::npos) {
+                // cout << "DEBUG: Parsing OUTPUT line: \"" << line << "\"" << endl;
                 parseIO(line, circuit.outputs);
+                // cout << "DEBUG: After parsing, outputs contain: ";
+                vector<string> sorted_outputs(circuit.outputs.begin(), circuit.outputs.end());
+                sort(sorted_outputs.begin(), sorted_outputs.end());
+                for (const auto& out : sorted_outputs) {
+                    // cout << "\"" << out << "\" ";
+                }
+                // cout << endl << endl;
             }
             else if (line.find("assign") != string::npos) {
                 parseAssignment(line, circuit);
@@ -529,48 +545,114 @@ public:
 
 private:
     static void parseIO(const string& line, unordered_set<string>& container) {
+        // cout << "  DEBUG parseIO: Raw input line = \"" << line << "\"" << endl;
+        
         string cleaned = line;
         cleaned.erase(remove_if(cleaned.begin(), cleaned.end(),
                                 [](unsigned char c) { return c == ',' || c == ';'; }),
                       cleaned.end());
+        // cout << "  DEBUG parseIO: After removing commas/semicolons = \"" << cleaned << "\"" << endl;
 
         stringstream ss(cleaned);
         string word;
         ss >> word; // "input" or "output"
+        // cout << "  DEBUG parseIO: Declaration type = \"" << word << "\"" << endl;
 
-        // Check for vector [msb:lsb]
-        string range = "";
-        ss >> word;
-        if (!word.empty() && word[0] == '[') {
-            range = word;
-            ss >> word; // move to first signal after vector
-        }
-
-        int msb = 0, lsb = 0;
-        if (!range.empty()) {
-            range.erase(remove(range.begin(), range.end(), '['), range.end());
-            range.erase(remove(range.begin(), range.end(), ']'), range.end());
-            size_t colonPos = range.find(':');
-            if (colonPos != string::npos) {
-                msb = stoi(range.substr(0, colonPos));
-                lsb = stoi(range.substr(colonPos + 1));
-            }
-        }
-
-        do {
-            if (range.empty()) {
-                container.insert(word);
+        string currentRange = "";
+        // cout << "  DEBUG parseIO: Processing remaining tokens..." << endl;
+        
+        while (ss >> word) {
+            // cout << "    DEBUG parseIO: Processing token = \"" << word << "\"" << endl;
+            
+            if (word[0] == '[') {
+                // This is a range specification
+                currentRange = word;
+                // cout << "      DEBUG parseIO: Found range specification = \"" << currentRange << "\"" << endl;
             } else {
-                for (int i = msb; i >= lsb; --i) {
-                    container.insert(word + "[" + to_string(i) + "]");
+                // This is a signal name
+                if (!currentRange.empty()) {
+                    // Parse the range
+                    string rangeClean = currentRange;
+                    // cout << "      DEBUG parseIO: Signal \"" << word << "\" has range \"" << currentRange << "\"" << endl;
+                    rangeClean.erase(remove(rangeClean.begin(), rangeClean.end(), '['), rangeClean.end());
+                    rangeClean.erase(remove(rangeClean.begin(), rangeClean.end(), ']'), rangeClean.end());
+                    // cout << "      DEBUG parseIO: Cleaned range = \"" << rangeClean << "\"" << endl;
+                    
+                    size_t colonPos = rangeClean.find(':');
+                    if (colonPos != string::npos) {
+                        int msb = stoi(rangeClean.substr(0, colonPos));
+                        int lsb = stoi(rangeClean.substr(colonPos + 1));
+                        // cout << "      DEBUG parseIO: Parsed as vector [" << msb << ":" << lsb << "]" << endl;
+                        // cout << "      DEBUG parseIO: Adding vector bits: ";
+                        for (int i = msb; i >= lsb; --i) {
+                            string bit_signal = word + "[" + to_string(i) + "]";
+                            container.insert(bit_signal);
+                            // cout << "\"" << bit_signal << "\" ";
+                        }
+                        // cout << endl;
+                    } else {
+                        // Single bit
+                        // cout << "      DEBUG parseIO: Parsed as single bit [" << rangeClean << "]" << endl;
+                        string bit_signal = word + "[" + rangeClean + "]";
+                        container.insert(bit_signal);
+                        // cout << "      DEBUG parseIO: Added single bit: \"" << bit_signal << "\"" << endl;
+                    }
+                    currentRange = ""; // Reset range after use
+                } else {
+                    // No range, scalar signal
+                    container.insert(word);
+                    // cout << "      DEBUG parseIO: No range found, adding scalar signal: \"" << word << "\"" << endl;
                 }
             }
-        } while (ss >> word);
+        }
+        // cout << "  DEBUG parseIO: Finished processing line. Container now has " << container.size() << " signals." << endl;
+    }
+
+    // Helper to extract base name (remove [index] if present)
+    static string extractBaseName(const string& signal) {
+        size_t pos = signal.find('[');
+        if (pos != string::npos) {
+            return signal.substr(0, pos);
+        }
+        return signal;
+    }
+
+    // Helper to check if a name is a vector base
+    static bool isVectorBase(const string& name, const LogicCircuit& circuit) {
+        // Check if any output or input contains this base name with [index]
+        for (const auto& out : circuit.outputs) {
+            if (out.find(name + "[") == 0) {
+                return true;
+            }
+        }
+        for (const auto& in : circuit.inputs) {
+            if (in.find(name + "[") == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Helper to get vector width from base name
+    static int getVectorWidth(const string& baseName, const LogicCircuit& circuit) {
+        int width = 0;
+        for (const auto& out : circuit.outputs) {
+            if (out.find(baseName + "[") == 0) {
+                width++;
+            }
+        }
+        if (width == 0) {
+            for (const auto& in : circuit.inputs) {
+                if (in.find(baseName + "[") == 0) {
+                    width++;
+                }
+            }
+        }
+        return width;
     }
 
     static void parseAssignment(const string& line, LogicCircuit& circuit) {
         string cleaned = line;
-        // Remove semicolon
         cleaned.erase(remove(cleaned.begin(), cleaned.end(), ';'), cleaned.end());
 
         size_t pos = cleaned.find('=');
@@ -579,12 +661,10 @@ private:
         string lhs = cleaned.substr(0, pos);
         string rhs = cleaned.substr(pos + 1);
 
-        // Remove "assign" from lhs if present (e.g., "assign out = ...")
         if (lhs.find("assign") != string::npos) {
-            lhs = lhs.substr(lhs.find("assign") + 6); // "assign" is 6 letters
+            lhs = lhs.substr(lhs.find("assign") + 6);
         }
 
-        // Trim whitespace
         auto trim = [](string& s) {
             s.erase(s.begin(), find_if(s.begin(), s.end(), [](unsigned char c) { return !isspace(c); }));
             s.erase(find_if(s.rbegin(), s.rend(), [](unsigned char c) { return !isspace(c); }).base(), s.end());
@@ -594,32 +674,107 @@ private:
 
         if (lhs.empty() || rhs.empty()) return;
 
-        // Check for vector assignments: both sides have [msb:lsb]
+        // cout << "DEBUG: Parsing assignment - LHS: \"" << lhs << "\", RHS: \"" << rhs << "\"" << endl;
+
+        // Check for explicit vector assignments (both sides have ranges)
         auto lhsRangePos = lhs.find('[');
         auto rhsRangePos = rhs.find('[');
 
         if (lhsRangePos != string::npos && rhsRangePos != string::npos) {
-            // Parse ranges
+            // cout << "  DEBUG: Both sides have explicit ranges, processing as vector assignment" << endl;
             int lhsMsb, lhsLsb, rhsMsb, rhsLsb;
             parseRange(lhs, lhsMsb, lhsLsb);
             parseRange(rhs, rhsMsb, rhsLsb);
 
-            // Ensure same width
             if ((lhsMsb - lhsLsb) != (rhsMsb - rhsLsb)) {
                 throw runtime_error("Vector width mismatch in assignment");
             }
 
             int width = lhsMsb - lhsLsb + 1;
+            // cout << "  DEBUG: Vector width = " << width << ", expanding to bit assignments" << endl;
             for (int i = 0; i < width; ++i) {
                 string lhsBit = lhs.substr(0, lhsRangePos) + "[" + to_string(lhsMsb - i) + "]";
                 string rhsBit = rhs.substr(0, rhsRangePos) + "[" + to_string(rhsMsb - i) + "]";
+                // cout << "    DEBUG: Bit assignment " << i << ": \"" << lhsBit << "\" = \"" << rhsBit << "\"" << endl;
+                int tempCounter = 0;
+                parseExpression(rhsBit, lhsBit, circuit, tempCounter);
+            }
+        }
+        // Check for implicit vector assignment (LHS is a vector base name)
+        else if (isVectorBase(lhs, circuit)) {
+            // cout << "  DEBUG: LHS is vector base, expanding implicit vector assignment" << endl;
+            int width = getVectorWidth(lhs, circuit);
+            // cout << "  DEBUG: Vector width = " << width << ", expanding to bit assignments" << endl;
+            
+            for (int i = 0; i < width; i++) {
+                // Get the actual bit index (assuming [3:0] format)
+                // Find the highest bit index from outputs
+                int bitIdx = -1;
+                for (const auto& out : circuit.outputs) {
+                    if (out.find(lhs + "[") == 0) {
+                        size_t start = lhs.length() + 1;
+                        size_t end = out.find(']', start);
+                        if (end != string::npos) {
+                            int idx = stoi(out.substr(start, end - start));
+                            if (bitIdx == -1 || idx > bitIdx) {
+                                bitIdx = idx;
+                            }
+                        }
+                    }
+                }
+                if (bitIdx == -1) {
+                    // Fallback: assume [width-1:0] format
+                    bitIdx = width - 1 - i;
+                } else {
+                    bitIdx = bitIdx - i;
+                }
+                
+                string lhsBit = lhs + "[" + to_string(bitIdx) + "]";
+                
+                // Rewrite RHS for this bit - replace vector base names with bit references
+                string rhsBit = rhs;
+                // Simple approach: replace standalone occurrences of vector base names
+                vector<string> vectorBases;
+                for (const auto& in : circuit.inputs) {
+                    string base = extractBaseName(in);
+                    if (find(vectorBases.begin(), vectorBases.end(), base) == vectorBases.end()) {
+                        vectorBases.push_back(base);
+                    }
+                }
+                for (const auto& out : circuit.outputs) {
+                    string base = extractBaseName(out);
+                    if (find(vectorBases.begin(), vectorBases.end(), base) == vectorBases.end()) {
+                        vectorBases.push_back(base);
+                    }
+                }
+                
+                string tempRhs = rhsBit;
+                for (const string& base : vectorBases) {
+                    size_t pos = 0;
+                    while ((pos = tempRhs.find(base, pos)) != string::npos) {
+                        bool beforeOk = (pos == 0) || !isalnum(tempRhs[pos-1]);
+                        size_t afterPos = pos + base.length();
+                        bool afterOk = (afterPos >= tempRhs.length()) || !isalnum(tempRhs[afterPos]);
+                        
+                        if (beforeOk && afterOk) {
+                            tempRhs.replace(pos, base.length(), base + "[" + to_string(bitIdx) + "]");
+                            pos += base.length() + 3 + to_string(bitIdx).length();
+                        } else {
+                            pos += base.length();
+                        }
+                    }
+                }
+                rhsBit = tempRhs;
+                
+                // cout << "    DEBUG: Bit assignment " << i << ": \"" << lhsBit << "\" = \"" << rhsBit << "\"" << endl;
                 int tempCounter = 0;
                 parseExpression(rhsBit, lhsBit, circuit, tempCounter);
             }
         } else {
-            // Scalar assignment
+            // cout << "  DEBUG: Scalar assignment (no vector context)" << endl;
             int tempCounter = 0;
-            parseExpression(rhs, lhs, circuit, tempCounter);
+            string result = parseExpression(rhs, lhs, circuit, tempCounter);
+            // cout << "  DEBUG: parseExpression returned: \"" << result << "\"" << endl;
         }
     }
 
@@ -641,6 +796,55 @@ int main(int argc, char* argv[]) {
     }
     string filename = argv[1];
     LogicCircuit circuit = VerilogParser::parse(filename);
+
+    cout << "\n=== FINAL CIRCUIT STATE ===" << endl;
+    cout << "Inputs (" << circuit.inputs.size() << "): ";
+    vector<string> sorted_inputs(circuit.inputs.begin(), circuit.inputs.end());
+    sort(sorted_inputs.begin(), sorted_inputs.end());
+    for (const auto& inp : sorted_inputs) {
+        cout << "\"" << inp << "\" ";
+    }
+    cout << endl;
+
+    cout << "Outputs (" << circuit.outputs.size() << "): ";
+    vector<string> sorted_outputs(circuit.outputs.begin(), circuit.outputs.end());
+    sort(sorted_outputs.begin(), sorted_outputs.end());
+    for (const auto& out : sorted_outputs) {
+        cout << "\"" << out << "\" ";
+    }
+    cout << endl;
+
+    cout << "Wires (" << circuit.wires.size() << "): ";
+    vector<string> sorted_wires(circuit.wires.begin(), circuit.wires.end());
+    sort(sorted_wires.begin(), sorted_wires.end());
+    for (const auto& wire : sorted_wires) {
+        cout << "\"" << wire << "\" ";
+    }
+    cout << endl;
+
+    cout << "Gates (" << circuit.gates.size() << "):" << endl;
+    for (size_t i = 0; i < circuit.gates.size(); i++) {
+        const Gate& g = circuit.gates[i];
+        cout << "  Gate " << i << ": " << g.output << " = ";
+        // Print gate type
+        switch (g.type) {
+            case Gate::Type::AND: cout << "AND("; break;
+            case Gate::Type::OR: cout << "OR("; break;
+            case Gate::Type::NOT: cout << "NOT("; break;
+            case Gate::Type::XOR: cout << "XOR("; break;
+            case Gate::Type::XNOR: cout << "XNOR("; break;
+            case Gate::Type::NAND: cout << "NAND("; break;
+            case Gate::Type::NOR: cout << "NOR("; break;
+            case Gate::Type::BUF: cout << "BUF("; break;
+            case Gate::Type::MUX: cout << "MUX("; break;
+        }
+        for (size_t j = 0; j < g.inputs.size(); j++) {
+            if (j > 0) cout << ", ";
+            cout << g.inputs[j];
+        }
+        cout << ")" << endl;
+    }
+    cout << "==========================\n" << endl;
 
     CNFConverter converter;
     auto cnf = converter.circuitToCNF(circuit);

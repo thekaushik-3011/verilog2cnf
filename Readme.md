@@ -41,7 +41,7 @@ It supports standard logic gates (`AND`, `OR`, `NOT`, `XOR`, `XNOR`, `NAND`, `NO
 ## Build
 
 ```bash
-g++ -std=c++17 -O2 -o sat_cnf main.cpp
+g++ -std=c++17 -O2 -o sat_cnf sat_cnf.cpp
 ```
 
 ---
