@@ -42,6 +42,24 @@ It supports standard logic gates (`AND`, `OR`, `NOT`, `XOR`, `XNOR`, `NAND`, `NO
 
 ```bash
 g++ -std=c++17 -O2 -o sat_cnf sat_cnf.cpp
+````
+
+Alternatively, you can use the provided **Makefile**:
+
+```makefile
+CXX = g++
+CXXFLAGS = -std=c++11 -O2 -Wall
+
+ver2cnf: ver2cnf.cpp
+	$(CXX) $(CXXFLAGS) -o ver2cnf ver2cnf.cpp
+
+equiv_checker: equiv_checker.cpp ver2cnf.cpp
+	$(CXX) $(CXXFLAGS) -o equiv_checker equiv_checker.cpp ver2cnf.cpp
+
+clean:
+	rm -f ver2cnf equiv_checker equivalence.cnf circuit.cnf
+
+.PHONY: clean
 ```
 
 ---
@@ -122,15 +140,22 @@ Here:
 
 ```
 .
-├── main.cpp         # Core implementation
-├── circuit.cnf      # Generated CNF output (after running)
-└── README.md        # Documentation
+├── main.cpp          # Core implementation
+├── sat_cnf.cpp       # Core code for Verilog-to-CNF conversion
+├── ver2cnf.cpp       # Used for CNF conversion (supporting code)
+├── ver2cnf.h         # Header for conversion utilities
+├── equiv_checker.cpp # Checks equivalence of circuits using MiniSat
+├── Makefile          # Build automation
+├── circuit.cnf       # Generated CNF output (after running)
+└── README.md         # Documentation
 ```
 
 ---
 
 ## Notes
 
+* `sat_cnf.cpp` is the **core code** responsible for parsing and converting Verilog into CNF.
+* The other `.cpp` and `.h` files (`ver2cnf.cpp`, `ver2cnf.h`, `equiv_checker.cpp`) are supporting modules for conversion and equivalence checking with **MiniSat**.
 * Only **combinational logic** is supported (no sequential elements like flip-flops).
 * CNF is directly usable in SAT solvers like **MiniSat**, **Glucose**, etc.
 * Signal names are mapped to CNF variables to aid debugging.
