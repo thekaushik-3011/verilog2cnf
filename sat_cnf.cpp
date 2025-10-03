@@ -619,18 +619,94 @@ private:
 
     // Helper to check if a name is a vector base
     static bool isVectorBase(const string& name, const LogicCircuit& circuit) {
-        // Check if any output or input contains this base name with [index]
-        for (const auto& out : circuit.outputs) {
-            if (out.find(name + "[") == 0) {
+        // Check if any declared input or output starts with "name["
+        for (const auto& signal : circuit.inputs) {
+            if (signal.length() > name.length() + 2 && 
+                signal.substr(0, name.length()) == name && 
+                signal[name.length()] == '[') {
                 return true;
             }
         }
-        for (const auto& in : circuit.inputs) {
-            if (in.find(name + "[") == 0) {
+        for (const auto& signal : circuit.outputs) {
+            if (signal.length() > name.length() + 2 && 
+                signal.substr(0, name.length()) == name && 
+                signal[name.length()] == '[') {
                 return true;
             }
         }
         return false;
+    }
+
+    // Helper to get vector bit signals for a base name
+    static vector<string> getVectorBits(const string& baseName, const LogicCircuit& circuit) {
+        vector<string> bits;
+        
+        // Check outputs first (for LHS)
+        for (const auto& signal : circuit.outputs) {
+            if (signal.length() > baseName.length() + 2 && 
+                signal.substr(0, baseName.length()) == baseName && 
+                signal[baseName.length()] == '[') {
+                bits.push_back(signal);
+            }
+        }
+        
+        // If no outputs found, check inputs (for RHS)
+        if (bits.empty()) {
+            for (const auto& signal : circuit.inputs) {
+                if (signal.length() > baseName.length() + 2 && 
+                    signal.substr(0, baseName.length()) == baseName && 
+                    signal[baseName.length()] == '[') {
+                    bits.push_back(signal);
+                }
+            }
+        }
+        
+        // Sort bits by index (assuming format "name[index]")
+        sort(bits.begin(), bits.end(), [](const string& a, const string& b) {
+            size_t a_start = a.find('[') + 1;
+            size_t a_end = a.find(']', a_start);
+            size_t b_start = b.find('[') + 1;
+            size_t b_end = b.find(']', b_start);
+            
+            if (a_start != string::npos && a_end != string::npos && 
+                b_start != string::npos && b_end != string::npos) {
+                int a_idx = stoi(a.substr(a_start, a_end - a_start));
+                int b_idx = stoi(b.substr(b_start, b_end - b_start));
+                return a_idx > b_idx; // descending order: [3], [2], [1], [0]
+            }
+            return a < b;
+        });
+        
+        return bits;
+    }
+
+    // Helper to rewrite expression for a specific bit index
+    static string rewriteExpressionForBit(const string& expr, const string& baseName, const string& bitSignal, const LogicCircuit& circuit) {
+        string result = expr;
+        size_t pos = 0;
+        
+        // Find the bit index from bitSignal (e.g., "a[3]" -> index = 3)
+        size_t idx_start = bitSignal.find('[') + 1;
+        size_t idx_end = bitSignal.find(']', idx_start);
+        string bitIndexStr = (idx_start != string::npos && idx_end != string::npos) ? 
+            bitSignal.substr(idx_start, idx_end - idx_start) : "0";
+        
+        while ((pos = result.find(baseName, pos)) != string::npos) {
+            // Check if it's a standalone word (bounded by non-alphanumeric chars)
+            bool beforeOk = (pos == 0) || !isalnum(static_cast<unsigned char>(result[pos-1]));
+            size_t afterPos = pos + baseName.length();
+            bool afterOk = (afterPos >= result.length()) || !isalnum(static_cast<unsigned char>(result[afterPos]));
+            
+            if (beforeOk && afterOk) {
+                // Replace baseName with bitSignal
+                result.replace(pos, baseName.length(), bitSignal);
+                pos += bitSignal.length();
+            } else {
+                pos += baseName.length();
+            }
+        }
+        
+        return result;
     }
 
     // Helper to get vector width from base name
@@ -652,36 +728,56 @@ private:
     }
 
     static void parseAssignment(const string& line, LogicCircuit& circuit) {
+        cout << "DEBUG ASSIGN: Raw line = \"" << line << "\"" << endl;
+        
         string cleaned = line;
         cleaned.erase(remove(cleaned.begin(), cleaned.end(), ';'), cleaned.end());
+        cout << "DEBUG ASSIGN: After removing semicolon = \"" << cleaned << "\"" << endl;
 
         size_t pos = cleaned.find('=');
-        if (pos == string::npos) return;
+        if (pos == string::npos) {
+            cout << "DEBUG ASSIGN: No '=' found, skipping line" << endl;
+            return;
+        }
 
         string lhs = cleaned.substr(0, pos);
         string rhs = cleaned.substr(pos + 1);
+        cout << "DEBUG ASSIGN: Raw LHS = \"" << lhs << "\", Raw RHS = \"" << rhs << "\"" << endl;
 
         if (lhs.find("assign") != string::npos) {
-            lhs = lhs.substr(lhs.find("assign") + 6);
+            size_t assignPos = lhs.find("assign");
+            lhs = lhs.substr(assignPos + 6);
+            cout << "DEBUG ASSIGN: After removing 'assign', LHS = \"" << lhs << "\"" << endl;
         }
 
         auto trim = [](string& s) {
+            if (s.empty()) return;
             s.erase(s.begin(), find_if(s.begin(), s.end(), [](unsigned char c) { return !isspace(c); }));
             s.erase(find_if(s.rbegin(), s.rend(), [](unsigned char c) { return !isspace(c); }).base(), s.end());
         };
         trim(lhs);
         trim(rhs);
+        cout << "DEBUG ASSIGN: Trimmed LHS = \"" << lhs << "\", Trimmed RHS = \"" << rhs << "\"" << endl;
 
-        if (lhs.empty() || rhs.empty()) return;
+        if (lhs.empty() || rhs.empty()) {
+            cout << "DEBUG ASSIGN: Empty LHS or RHS, skipping" << endl;
+            return;
+        }
 
-        // cout << "DEBUG: Parsing assignment - LHS: \"" << lhs << "\", RHS: \"" << rhs << "\"" << endl;
-
-        // Check for explicit vector assignments (both sides have ranges)
+        // Check if this is a SIMPLE vector assignment (both sides are just signal[range])
         auto lhsRangePos = lhs.find('[');
         auto rhsRangePos = rhs.find('[');
+        
+        bool lhsIsSimpleVector = (lhsRangePos != string::npos) && 
+                                (lhs.find_first_of(" \t()&|^~?:", lhsRangePos) == string::npos);
+        bool rhsIsSimpleVector = (rhsRangePos != string::npos) && 
+                                (rhs.find_first_of(" \t()&|^~?:", rhsRangePos) == string::npos);
+        
+        cout << "DEBUG ASSIGN: LHS simple vector: " << (lhsIsSimpleVector ? "YES" : "NO") 
+            << ", RHS simple vector: " << (rhsIsSimpleVector ? "YES" : "NO") << endl;
 
-        if (lhsRangePos != string::npos && rhsRangePos != string::npos) {
-            // cout << "  DEBUG: Both sides have explicit ranges, processing as vector assignment" << endl;
+        if (lhsIsSimpleVector && rhsIsSimpleVector) {
+            cout << "DEBUG ASSIGN: Processing as explicit vector assignment" << endl;
             int lhsMsb, lhsLsb, rhsMsb, rhsLsb;
             parseRange(lhs, lhsMsb, lhsLsb);
             parseRange(rhs, rhsMsb, rhsLsb);
@@ -691,90 +787,74 @@ private:
             }
 
             int width = lhsMsb - lhsLsb + 1;
-            // cout << "  DEBUG: Vector width = " << width << ", expanding to bit assignments" << endl;
+            cout << "DEBUG ASSIGN: Vector width = " << width << ", creating " << width << " bit assignments" << endl;
             for (int i = 0; i < width; ++i) {
                 string lhsBit = lhs.substr(0, lhsRangePos) + "[" + to_string(lhsMsb - i) + "]";
                 string rhsBit = rhs.substr(0, rhsRangePos) + "[" + to_string(rhsMsb - i) + "]";
-                // cout << "    DEBUG: Bit assignment " << i << ": \"" << lhsBit << "\" = \"" << rhsBit << "\"" << endl;
+                cout << "DEBUG ASSIGN: Bit " << i << " - LHS: \"" << lhsBit << "\", RHS: \"" << rhsBit << "\"" << endl;
                 int tempCounter = 0;
                 parseExpression(rhsBit, lhsBit, circuit, tempCounter);
             }
         }
-        // Check for implicit vector assignment (LHS is a vector base name)
+        // Check if LHS is a vector base name (implicit vector assignment)
         else if (isVectorBase(lhs, circuit)) {
-            // cout << "  DEBUG: LHS is vector base, expanding implicit vector assignment" << endl;
-            int width = getVectorWidth(lhs, circuit);
-            // cout << "  DEBUG: Vector width = " << width << ", expanding to bit assignments" << endl;
+            cout << "DEBUG ASSIGN: LHS is vector base, expanding implicit vector assignment" << endl;
+            vector<string> lhsBits = getVectorBits(lhs, circuit);
+            cout << "DEBUG ASSIGN: Found " << lhsBits.size() << " bits for LHS: ";
+            for (const auto& bit : lhsBits) {
+                cout << "\"" << bit << "\" ";
+            }
+            cout << endl;
             
-            for (int i = 0; i < width; i++) {
-                // Get the actual bit index (assuming [3:0] format)
-                // Find the highest bit index from outputs
-                int bitIdx = -1;
-                for (const auto& out : circuit.outputs) {
-                    if (out.find(lhs + "[") == 0) {
-                        size_t start = lhs.length() + 1;
-                        size_t end = out.find(']', start);
-                        if (end != string::npos) {
-                            int idx = stoi(out.substr(start, end - start));
-                            if (bitIdx == -1 || idx > bitIdx) {
-                                bitIdx = idx;
-                            }
+            // For each bit, create assignment
+            for (const string& lhsBit : lhsBits) {
+                // Rewrite RHS for this bit
+                string rhsBit = rhs;
+                
+                // Replace vector base names in RHS with corresponding bit signals
+                // First, get all vector base names from inputs
+                vector<string> vectorBases;
+                for (const auto& in : circuit.inputs) {
+                    size_t bracketPos = in.find('[');
+                    if (bracketPos != string::npos) {
+                        string base = in.substr(0, bracketPos);
+                        if (find(vectorBases.begin(), vectorBases.end(), base) == vectorBases.end()) {
+                            vectorBases.push_back(base);
                         }
                     }
                 }
-                if (bitIdx == -1) {
-                    // Fallback: assume [width-1:0] format
-                    bitIdx = width - 1 - i;
-                } else {
-                    bitIdx = bitIdx - i;
-                }
                 
-                string lhsBit = lhs + "[" + to_string(bitIdx) + "]";
-                
-                // Rewrite RHS for this bit - replace vector base names with bit references
-                string rhsBit = rhs;
-                // Simple approach: replace standalone occurrences of vector base names
-                vector<string> vectorBases;
-                for (const auto& in : circuit.inputs) {
-                    string base = extractBaseName(in);
-                    if (find(vectorBases.begin(), vectorBases.end(), base) == vectorBases.end()) {
-                        vectorBases.push_back(base);
-                    }
-                }
-                for (const auto& out : circuit.outputs) {
-                    string base = extractBaseName(out);
-                    if (find(vectorBases.begin(), vectorBases.end(), base) == vectorBases.end()) {
-                        vectorBases.push_back(base);
-                    }
-                }
-                
+                // For each vector base, replace it with the corresponding bit
                 string tempRhs = rhsBit;
                 for (const string& base : vectorBases) {
-                    size_t pos = 0;
-                    while ((pos = tempRhs.find(base, pos)) != string::npos) {
-                        bool beforeOk = (pos == 0) || !isalnum(tempRhs[pos-1]);
-                        size_t afterPos = pos + base.length();
-                        bool afterOk = (afterPos >= tempRhs.length()) || !isalnum(tempRhs[afterPos]);
-                        
-                        if (beforeOk && afterOk) {
-                            tempRhs.replace(pos, base.length(), base + "[" + to_string(bitIdx) + "]");
-                            pos += base.length() + 3 + to_string(bitIdx).length();
-                        } else {
-                            pos += base.length();
+                    if (isVectorBase(base, circuit)) {
+                        // Find the corresponding bit for this base at the same index as lhsBit
+                        vector<string> baseBits = getVectorBits(base, circuit);
+                        // Find the index of lhsBit to match the same position
+                        size_t lhsIdx = 0;
+                        for (size_t i = 0; i < lhsBits.size(); i++) {
+                            if (lhsBits[i] == lhsBit) {
+                                lhsIdx = i;
+                                break;
+                            }
+                        }
+                        if (lhsIdx < baseBits.size()) {
+                            tempRhs = rewriteExpressionForBit(tempRhs, base, baseBits[lhsIdx], circuit);
                         }
                     }
                 }
                 rhsBit = tempRhs;
                 
-                // cout << "    DEBUG: Bit assignment " << i << ": \"" << lhsBit << "\" = \"" << rhsBit << "\"" << endl;
+                cout << "DEBUG ASSIGN: Bit assignment - LHS: \"" << lhsBit << "\", RHS: \"" << rhsBit << "\"" << endl;
                 int tempCounter = 0;
                 parseExpression(rhsBit, lhsBit, circuit, tempCounter);
             }
         } else {
-            // cout << "  DEBUG: Scalar assignment (no vector context)" << endl;
+            cout << "DEBUG ASSIGN: Processing as scalar/complex assignment" << endl;
             int tempCounter = 0;
             string result = parseExpression(rhs, lhs, circuit, tempCounter);
-            // cout << "  DEBUG: parseExpression returned: \"" << result << "\"" << endl;
+            cout << "DEBUG ASSIGN: parseExpression returned: \"" << result << "\"" << endl;
+            cout << "DEBUG ASSIGN: Current circuit has " << circuit.gates.size() << " gates" << endl;
         }
     }
 
