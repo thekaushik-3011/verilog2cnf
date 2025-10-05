@@ -483,12 +483,10 @@ private:
                 string leftOp = cleaned.substr(0, plusPos);
                 string rightOp = cleaned.substr(plusPos + 1);
                 
-                // Extract base names for vector operations
                 string leftBase = extractBaseName(leftOp);
                 string rightBase = extractBaseName(rightOp);
                 string targetBase = extractBaseName(target);
                 
-                // Check if we're dealing with vectors
                 if (isVectorBase(leftBase, circuit) && isVectorBase(rightBase, circuit)) {
                     return generateAdder(leftBase, rightBase, targetBase, circuit, tempCounter);
                 } else {
@@ -511,12 +509,10 @@ private:
                 string leftOp = cleaned.substr(0, minusPos);
                 string rightOp = cleaned.substr(minusPos + 1);
                 
-                // Extract base names for vector operations
                 string leftBase = extractBaseName(leftOp);
                 string rightBase = extractBaseName(rightOp);
                 string targetBase = extractBaseName(target);
                 
-                // Check if we're dealing with vectors
                 if (isVectorBase(leftBase, circuit) && isVectorBase(rightBase, circuit)) {
                     return generateSubtractor(leftBase, rightBase, targetBase, circuit, tempCounter);
                 } else {
@@ -823,7 +819,150 @@ private:
     }
 
     static void parseGenerateBlock(const string& block, LogicCircuit& circuit) {
-        cout << "DEBUG GENERATE: Processing generate block (not fully implemented)" << endl;
+        cout << "DEBUG GENERATE: Processing generate block" << endl;
+        
+        if (block.find("for") != string::npos) {
+            parseForGenerate(block, circuit);
+        }
+    }
+
+    // REPLACE your function with this fully corrected version.
+    static string evaluateGenerateExpression(string expr, const string& varName, int value) {
+        // This regex finds patterns like [i], [i+1], [1+i], [7-i], [i*2], [2*i] etc.
+        regex pattern(R"(\[(\s*(?:\w+|\d+)\s*(?:[\+\-\*]\s*(?:\w+|\d+)\s*)*)\])");
+        
+        // Use sregex_iterator for safe iteration over all matches
+        auto matches_begin = sregex_iterator(expr.begin(), expr.end(), pattern);
+        auto matches_end = sregex_iterator();
+
+        string result;
+        // FIX 1: Use cbegin() to get a const_iterator
+        auto last_match_end = expr.cbegin();
+
+        for (sregex_iterator i = matches_begin; i != matches_end; ++i) {
+            smatch match = *i;
+            string inner_expr = match[1].str();
+            
+            result.append(last_match_end, match.prefix().second);
+            
+            if (inner_expr.find(varName) != string::npos) {
+                string replaced_inner = regex_replace(inner_expr, regex("\\b" + varName + "\\b"), to_string(value));
+                
+                int finalValue = value;
+                smatch arith_match;
+                if (regex_match(replaced_inner, arith_match, regex(R"(\s*(\d+)\s*-\s*(\d+)\s*)"))) {
+                    finalValue = stoi(arith_match[1]) - stoi(arith_match[2]);
+                } else if (regex_match(replaced_inner, arith_match, regex(R"(\s*(\d+)\s*\+\s*(\d+)\s*)"))) {
+                    finalValue = stoi(arith_match[1]) + stoi(arith_match[2]);
+                } else if (regex_match(replaced_inner, arith_match, regex(R"(\s*(\d+)\s*)"))) {
+                    finalValue = stoi(arith_match[1]);
+                }
+                
+                result += "[" + to_string(finalValue) + "]";
+            } else {
+                result += "[" + inner_expr + "]";
+            }
+            
+            last_match_end = match.suffix().first;
+        }
+
+        // --- THIS IS THE NEW FIX ---
+        // Use cend() to get a const_iterator for the end of the string.
+        result.append(last_match_end, expr.cend());
+
+        return result;
+    }
+
+    // REPLACE the old parseForGenerate function with this one.
+    static void parseForGenerate(const string& block, LogicCircuit& circuit) {
+        // This regex is more robust:
+        // - Handles optional "genvar"
+        // - Captures the loop variable name (i)
+        // - Captures the start value
+        // - Captures the comparison operator (<, <=, >, >=)
+        // - Captures the end value
+        // - Handles both "i = i + S" and "i++" / "++i" style increments
+        regex forRegex(R"(for\s*\(\s*(?:genvar\s+)?(\w+)\s*=\s*(\d+)\s*;\s*\1\s*([<>]=?)\s*(\d+)\s*;\s*(?:(?:\+\+)?\s*\1(?:\s*\+\+)?|\1\s*=\s*\1\s*\+\s*(\d+))\s*\)\s*begin)");
+        smatch match;
+
+        if (regex_search(block, match, forRegex)) {
+            string varName = match[1].str();
+            int start = stoi(match[2].str());
+            string op = match[3].str();
+            int endCond = stoi(match[4].str());
+            int step = 1;
+            if (match[5].matched) { // Check if the "i = i + S" group was matched
+                step = stoi(match[5].str());
+            }
+
+            cout << "DEBUG GENERATE: Unrolling loop for " << varName 
+                << " from " << start << " with condition " << op << " " << endCond << " step " << step << endl;
+            
+            // Robustly find the body of the generate block
+            size_t bodyStartPos = block.find("begin", match.position(0));
+            if (bodyStartPos == string::npos) {
+                cout << "WARNING: Malformed for-generate block, 'begin' not found." << endl;
+                return;
+            }
+            bodyStartPos += 5; // move past "begin"
+
+            size_t bodyEndPos = string::npos;
+            int depth = 1;
+            for (size_t i = bodyStartPos; i < block.length(); ++i) {
+                if (i + 4 < block.length() && block.substr(i, 5) == "begin") {
+                    depth++;
+                    i += 4;
+                } else if (i + 2 < block.length() && block.substr(i, 3) == "end") {
+                    depth--;
+                    if (depth == 0) {
+                        bodyEndPos = i;
+                        break;
+                    }
+                    i += 2;
+                }
+            }
+
+            if (bodyEndPos == string::npos) {
+                cout << "WARNING: Malformed for-generate block, matching 'end' not found." << endl;
+                return;
+            }
+
+            string body = block.substr(bodyStartPos, bodyEndPos - bodyStartPos);
+
+            for (int i = start; ; i += step) {
+                // Check the end condition based on the captured operator
+                bool conditionMet;
+                if (op == "<") conditionMet = (i < endCond);
+                else if (op == "<=") conditionMet = (i <= endCond);
+                else if (op == ">") conditionMet = (i > endCond);
+                else if (op == ">=") conditionMet = (i >= endCond);
+                else { cout << "WARNING: Unknown operator in generate for loop" << endl; break; }
+
+                if (!conditionMet) break;
+
+                cout << "DEBUG GENERATE: Iteration " << varName << " = " << i << endl;
+                
+                // 1. First, replace the genvar if it appears in arithmetic expressions inside brackets []
+                string unrolledBody = evaluateGenerateExpression(body, varName, i);
+                
+                // 2. Then, replace any remaining standalone instances of the genvar
+                unrolledBody = regex_replace(unrolledBody, regex("\\b" + varName + "\\b"), to_string(i));
+
+                istringstream iss(unrolledBody);
+                string line;
+                while (getline(iss, line)) {
+                    line = trim(line);
+                    if (line.empty()) continue;
+                    // You can expand this to handle other statement types inside a generate block
+                    if (line.find("assign") != string::npos) {
+                        parseAssignment(line, circuit);
+                    }
+                }
+            }
+        } else {
+            cout << "WARNING: Unsupported for-generate syntax. Skipping." << endl;
+            cout << "Block was: \"" << block << "\"" << endl;
+        }
     }
 
     static string rewriteExpressionForBit(const string& expr, const string& baseName, 
@@ -917,7 +1056,6 @@ private:
 
         string lhs = cleaned.substr(0, pos);
         string rhs = cleaned.substr(pos + (isNonBlocking ? 2 : 1));
-        cout << "DEBUG ASSIGN: Raw LHS = \"" << lhs << "\", Raw RHS = \"" << rhs << "\"" << endl;
 
         if (lhs.find("assign") != string::npos) {
             size_t assignPos = lhs.find("assign");
@@ -926,21 +1064,39 @@ private:
 
         lhs = trim(lhs);
         rhs = trim(rhs);
-        cout << "DEBUG ASSIGN: Trimmed LHS = \"" << lhs << "\", Trimmed RHS = \"" << rhs << "\"" << endl;
 
         if (lhs.empty() || rhs.empty()) {
             return;
         }
 
-        auto lhsRangePos = lhs.find('[');
-        auto rhsRangePos = rhs.find('[');
+        // KEY FIX: Check if LHS has bracket but determine if it's bit-select or range
+        auto lhsBracketPos = lhs.find('[');
+        bool lhsHasBracket = (lhsBracketPos != string::npos);
+        bool lhsHasColon = (lhsHasBracket && lhs.find(':', lhsBracketPos) != string::npos);
         
-        bool lhsIsSimpleVector = (lhsRangePos != string::npos) && 
-                                (lhs.find_first_of(" \t()&|^~?:", lhsRangePos) == string::npos);
-        bool rhsIsSimpleVector = (rhsRangePos != string::npos) && 
-                                (rhs.find_first_of(" \t()&|^~?:", rhsRangePos) == string::npos);
+        // Bit-select: has '[' but NO ':' (e.g., out[0])
+        // Range: has '[' AND ':' (e.g., out[7:0])
+        bool lhsIsBitSelect = lhsHasBracket && !lhsHasColon;
+        bool lhsIsRange = lhsHasBracket && lhsHasColon;
+        
+        // For bit-selects from generate loops, process directly
+        if (lhsIsBitSelect) {
+            cout << "DEBUG ASSIGN: Detected bit-select LHS: " << lhs << endl;
+            int tempCounter = 0;
+            parseExpression(rhs, lhs, circuit, tempCounter);
+            return;
+        }
 
-        if (lhsIsSimpleVector && rhsIsSimpleVector) {
+        auto rhsBracketPos = rhs.find('[');
+        bool rhsHasBracket = (rhsBracketPos != string::npos);
+        bool rhsHasColon = (rhsHasBracket && rhs.find(':', rhsBracketPos) != string::npos);
+        
+        bool rhsIsBitSelect = rhsHasBracket && !rhsHasColon;
+        bool rhsIsRange = rhsHasBracket && rhsHasColon;
+
+        // Handle range-to-range assignment
+        if (lhsIsRange && rhsIsRange) {
+            cout << "DEBUG ASSIGN: Range-to-range assignment" << endl;
             int lhsMsb, lhsLsb, rhsMsb, rhsLsb;
             parseRange(lhs, lhsMsb, lhsLsb);
             parseRange(rhs, rhsMsb, rhsLsb);
@@ -951,13 +1107,14 @@ private:
 
             int width = lhsMsb - lhsLsb + 1;
             for (int i = 0; i < width; ++i) {
-                string lhsBit = lhs.substr(0, lhsRangePos) + "[" + to_string(lhsMsb - i) + "]";
-                string rhsBit = rhs.substr(0, rhsRangePos) + "[" + to_string(rhsMsb - i) + "]";
+                string lhsBit = lhs.substr(0, lhsBracketPos) + "[" + to_string(lhsMsb - i) + "]";
+                string rhsBit = rhs.substr(0, rhsBracketPos) + "[" + to_string(rhsMsb - i) + "]";
                 int tempCounter = 0;
                 parseExpression(rhsBit, lhsBit, circuit, tempCounter);
             }
         }
         else if (isVectorBase(lhs, circuit)) {
+            cout << "DEBUG ASSIGN: Vector base assignment" << endl;
             vector<string> lhsBits = getVectorBits(lhs, circuit);
             
             for (const string& lhsBit : lhsBits) {
@@ -996,11 +1153,13 @@ private:
                 parseExpression(rhsBit, lhsBit, circuit, tempCounter);
             }
         } else {
+            cout << "DEBUG ASSIGN: Simple assignment" << endl;
             int tempCounter = 0;
-            string result = parseExpression(rhs, lhs, circuit, tempCounter);
+            parseExpression(rhs, lhs, circuit, tempCounter);
         }
     }
 
+// REPLACE the old VerilogParser::parse function with this corrected version.
 public:
     static LogicCircuit parse(const string& filename) {
         ifstream file(filename);
@@ -1015,29 +1174,45 @@ public:
             if (commentPos != string::npos) {
                 line = line.substr(0, commentPos);
             }
-            if (line.find("module") != string::npos) continue;
-            if (line.find("endmodule") != string::npos) continue;
+            string trimmedLine = trim(line);
+            if (trimmedLine.empty()) continue;
 
-            if (line.find("input") != string::npos) {
-                parseIO(line, circuit.inputs);
+            if (trimmedLine.rfind("module", 0) == 0) continue;
+            if (trimmedLine.rfind("endmodule", 0) == 0) continue;
+            
+            // *** START OF FIX ***
+            // Prioritize block-level statements like generate and always.
+            if (trimmedLine.rfind("generate", 0) == 0) {
+                string block = line;
+                string currentLine;
+                int depth = 1;
+                // Read the entire block until the matching endgenerate
+                while (getline(file, currentLine)) {
+                    block += "\n" + currentLine;
+                    if (currentLine.find("generate") != string::npos) depth++;
+                    if (currentLine.find("endgenerate") != string::npos) depth--;
+                    if (depth == 0) break;
+                }
+                parseGenerateBlock(block, circuit);
             }
-            else if (line.find("output") != string::npos) {
-                parseIO(line, circuit.outputs);
-            }
-            else if (line.find("reg") != string::npos) {
-                parseIO(line, circuit.registers);
-            }
-            else if (line.find("assign") != string::npos) {
-                parseAssignment(line, circuit);
-            }
-            else if (line.find("always") != string::npos) {
+            else if (trimmedLine.rfind("always", 0) == 0) {
                 string block = readVerilogBlock(file, line);
                 parseAlwaysBlock(block, circuit);
             }
-            else if (line.find("generate") != string::npos) {
-                string block = readVerilogBlock(file, line);
-                parseGenerateBlock(block, circuit);
+            // Only parse these if they are not inside a block being handled above.
+            else if (trimmedLine.rfind("input", 0) == 0) {
+                parseIO(line, circuit.inputs);
             }
+            else if (trimmedLine.rfind("output", 0) == 0) {
+                parseIO(line, circuit.outputs);
+            }
+            else if (trimmedLine.rfind("reg", 0) == 0) {
+                parseIO(line, circuit.registers);
+            }
+            else if (trimmedLine.rfind("assign", 0) == 0) {
+                parseAssignment(line, circuit);
+            }
+            // *** END OF FIX ***
         }
         return circuit;
     }
@@ -1054,7 +1229,6 @@ int main(int argc, char* argv[]) {
     try {
         LogicCircuit circuit = VerilogParser::parse(filename);
 
-        // Remove duplicate gates (same output = redundant)
         sort(circuit.gates.begin(), circuit.gates.end(), [](const Gate& a, const Gate& b) {
             return a.output < b.output;
         });
